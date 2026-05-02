@@ -1,37 +1,29 @@
-name: Run Bale Crawler Bot
+name: Bale Bot
 
 on:
-  workflow_dispatch:   # Manual start
   push:
-    branches: [ main ] # Run whenever you push code to main
+    branches: ["main"]
+  workflow_dispatch:
 
 jobs:
-  run-bot:
+  run:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install requirements
         run: |
-          pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Start Bale Bot
+      - name: Run bot
+        env:
+          BALE_TOKEN: ${{ secrets.BALE_TOKEN }}
         run: |
-          echo "Starting bot..."
-          nohup python app.py > bot.log 2>&1 &
-
-      - name: Keep job alive
-        run: |
-          echo "Bot is running..."
-          while true; do
-            sleep 300
-            echo "Still alive at $(date)"
-          done
+          python app.py
