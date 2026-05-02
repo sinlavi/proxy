@@ -1,101 +1,134 @@
 import os
-import yt_dlp
-import asyncio
-from aiohttp import web
+import base64
+import httpx
+from urllib.parse import urljoin
+from bs4 import BeautifulSoup
 from balethon import Client
 
 BALE_TOKEN = "1011430416:0-QaVTm8WjXtmVRcZKFvhfr_OGOL6OldiZs"
 
+if not BALE_TOKEN:
+    raise ValueError("BALE_TOKEN not set")
+
 bot = Client(BALE_TOKEN)
 
-# A simple static file server for MP3 files
-app = web.Application()
-routes = web.RouteTableDef()
 
-@routes.get("/{filename}")
-async def serve_file(request):
-    filename = request.match_info["filename"]
-    path = f"./{filename}"
-    if os.path.exists(path):
-        return web.FileResponse(path)
-    return web.Response(status=404, text="File not found")
-
-app.add_routes(routes)
-
-def start_server():
-    runner = web.AppRunner(app)
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(runner.setup())
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
-    loop.run_until_complete(site.start())
-    print("HTTP file server running on port 8080...")
+# -----------------------------
+# Browser-like headers
+# -----------------------------
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "*/*"
+}
 
 
-def download_mp3_sync(url: str):
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": "audio.%(ext)s",
-        "quiet": True,
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ]
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-
-    if not filename.endswith(".mp3"):
-        filename = filename.rsplit(".", 1)[0] + ".mp3"
-
-    return filename, info
+# -----------------------------
+# Fetch page
+# -----------------------------
+async def fetch_page(url):
+    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        return r.text
 
 
-async def download_mp3(url: str):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, download_mp3_sync, url)
+# -----------------------------
+# Inline assets
+# -----------------------------
+async def inline_assets(html, base_url):
+
+    soup = BeautifulSoup(html, "lxml")
+
+    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True) as client:
+
+        # CSS
+        for link in soup.find_all("link", rel="stylesheet"):
+            href = link.get("href")
+            if not href:
+                continue
+
+            asset_url = urljoin(base_url, href)
+
+            try:
+                r = await client.get(asset_url)
+                style = soup.new_tag("style")
+                style.string = r.text
+                link.replace_with(style)
+            except:
+                pass
+
+        # JS
+        for script in soup.find_all("script"):
+            src = script.get("src")
+            if not src:
+                continue
+
+            asset_url = urljoin(base_url, src)
+
+            try:
+                r = await client.get(asset_url)
+                new_script = soup.new_tag("script")
+                new_script.string = r.text
+                script.replace_with(new_script)
+            except:
+                pass
+
+        # Images
+        for img in soup.find_all("img"):
+            src = img.get("src")
+            if not src:
+                continue
+
+            asset_url = urljoin(base_url, src)
+
+            try:
+                r = await client.get(asset_url)
+                encoded = base64.b64encode(r.content).decode()
+                img["src"] = f"data:image;base64,{encoded}"
+            except:
+                pass
+
+    return str(soup)
 
 
+# -----------------------------
+# Bale handler
+# -----------------------------
 @bot.on_message()
-async def handler(message):
+async def handle(message):
+
     if not message.text:
         return
 
     text = message.text.strip()
 
-    if "soundcloud.com" in text:
-        await message.reply("Downloading as MP3...")
+    if not text.startswith("http"):
+        await message.reply("Send a URL.")
+        return
 
-        try:
-            filename, info = await download_mp3(text)
+    await message.reply("Downloading page...")
 
-            # Ensure file exists
-            if not os.path.exists(filename):
-                await message.reply("Error: MP3 not created.")
-                return
+    try:
+        html = await fetch_page(text)
+        final_html = await inline_assets(html, text)
 
-            # Build public URL
-            public_url = f"http://your-server-ip:8080/{filename}"
+        filename = "page.html"
 
-            caption = f"{info.get('title','Track')}\nby {info.get('uploader','Unknown')}"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(final_html)
 
-            # Send MP3 by URL
-            await message.reply_audio(
-                audio=public_url,
-                caption=caption
-            )
+        await message.reply_document(filename)
 
-            # Optional: delete after sending
-            # os.remove(filename)
-
-        except Exception as e:
-            await message.reply(f"Error:\n{e}")
+    except Exception as e:
+        await message.reply(f"Error:\n{str(e)}")
 
 
+# -----------------------------
+# Run
+# -----------------------------
 if __name__ == "__main__":
-    start_server()  # Start the MP3 HTTP server
     bot.run()
