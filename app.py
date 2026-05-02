@@ -1,119 +1,157 @@
+from flask import Flask, request
+import requests
+import urllib.parse
 import os
-import base64
-from urllib.parse import urljoin
-from bs4 import BeautifulSoup
-from balethon import Client
-from curl_cffi.requests import AsyncSession
 
-BALE_TOKEN = "1011430416:0-QaVTm8WjXtmVRcZKFvhfr_OGOL6OldiZs"
+# --- توکن و آدرس‌های API بله ---
+TOKEN = "1011430416:0-QaVTm8WjXtmVRcZKFvhfr_OGOL6OldiZs"
+BALE_API = f"https://tapi.bale.ai/bot{TOKEN}"
+API_MSG = f"{BALE_API}/sendMessage"
+API_FILE = f"{BALE_API}/sendDocument"
+API_PHOTO = f"{BALE_API}/sendPhoto"
 
-if not BALE_TOKEN:
-    raise ValueError("BALE_TOKEN not set")
+app = Flask(__name__)
 
-bot = Client(BALE_TOKEN)
+# ==========================================
+# توابع مربوط به API ویکی‌پدیا (زبان فارسی)
+# ==========================================
 
-# -----------------------------
-# Fetch page with Browser Impersonation
-# -----------------------------
-async def fetch_page(url):
-    # impersonate="chrome124" باعث می‌شود سرور کاملاً فکر کند درخواست از کروم واقعی می‌آید
-    async with AsyncSession(impersonate="chrome124", timeout=15.0) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        return r.text
+def search_wikipedia(query):
+    """جستجوی عبارت در ویکی‌پدیای فارسی و برگرداندن 5 نتیجه اول"""
+    url = f"https://fa.wikipedia.org/w/api.php?action=query&list=search&srsearch={query}&utf8=&format=json"
+    response = requests.get(url).json()
+    return response.get('query', {}).get('search', [])[:5]
+
+def get_wiki_summary(title):
+    """گرفتن خلاصه و عکس مقاله از ویکی‌پدیا"""
+    title_encoded = urllib.parse.quote(title)
+    url = f"https://fa.wikipedia.org/api/rest_v1/page/summary/{title_encoded}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        return response.json()
+    return None
+
+def download_wiki_pdf(title, filepath):
+    """دانلود PDF کامل مقاله مستقیما از سرور ویکی‌پدیا"""
+    title_encoded = urllib.parse.quote(title)
+    url = f"https://fa.wikipedia.org/api/rest_v1/page/pdf/{title_encoded}"
+    response = requests.get(url, stream=True)
+    if response.status_code == 200:
+        with open(filepath, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return True
+    return False
 
 
-# -----------------------------
-# Inline assets
-# -----------------------------
-async def inline_assets(html, base_url):
-    soup = BeautifulSoup(html, "lxml")
+# ==========================================
+# توابع ارسال پیام در پیام‌رسان بله
+# ==========================================
+
+def send_msg(chat_id, txt, reply_markup=None):
+    payload = {"chat_id": chat_id, "text": txt}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    requests.post(API_MSG, json=payload)
+
+def send_photo(chat_id, photo_url, caption="", reply_markup=None):
+    payload = {"chat_id": chat_id, "photo": photo_url, "caption": caption}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    requests.post(API_PHOTO, json=payload)
+
+def send_file(chat_id, path, caption=""):
+    with open(path, "rb") as f:
+        requests.post(API_FILE, data={"chat_id": chat_id, "caption": caption}, files={"document": f})
+
+
+# ==========================================
+# هندلر اصلی وب‌هوک
+# ==========================================
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = request.json
+
+    # --- مدیریت دکمه‌های شیشه‌ای (Callback Queries) ---
+    if "callback_query" in update:
+        callback = update["callback_query"]
+        chat_id = callback["message"]["chat"]["id"]
+        data = callback["data"]
+
+        # اگر کاربر روی یکی از نتایج جستجو کلیک کرد (برای دیدن خلاصه)
+        if data.startswith("sum|"):
+            title = data.split("|")[1]
+            wiki_data = get_wiki_summary(title)
+            
+            if wiki_data:
+                extract = wiki_data.get("extract", "خلاصه‌ای برای این مقاله یافت نشد.")
+                # ساخت دکمه دانلود PDF
+                markup = {
+                    "inline_keyboard": [
+                        [{"text": "📥 دانلود فایل PDF کامل مقاله", "callback_data": f"pdf|{title}"}]
+                    ]
+                }
+                
+                # اگر مقاله عکس داشت، عکس را با کپشن می‌فرستیم، وگرنه فقط متن
+                if "thumbnail" in wiki_data:
+                    photo_url = wiki_data["thumbnail"]["source"]
+                    send_photo(chat_id, photo_url, caption=f"**{title}**\n\n{extract}", reply_markup=markup)
+                else:
+                    send_msg(chat_id, f"**{title}**\n\n{extract}", reply_markup=markup)
+            else:
+                send_msg(chat_id, "❌ خطایی در دریافت اطلاعات رخ داد.")
+
+        # اگر کاربر روی دکمه دانلود PDF کلیک کرد
+        elif data.startswith("pdf|"):
+            title = data.split("|")[1]
+            send_msg(chat_id, "⏳ در حال آماده‌سازی و دانلود فایل PDF از ویکی‌پدیا... لطفا کمی صبر کنید.")
+            
+            pdf_path = f"{title}.pdf"
+            if download_wiki_pdf(title, pdf_path):
+                send_file(chat_id, pdf_path, caption=f"📄 فایل PDF مقاله: {title}")
+                os.remove(pdf_path) # پاک کردن فایل از سرور بعد از ارسال
+            else:
+                send_msg(chat_id, "❌ متاسفانه تولید PDF برای این مقاله با خطا مواجه شد.")
+
+        return "ok"
+
+    # --- مدیریت پیام‌های متنی ---
+    if "message" not in update:
+        return "ok"
+
+    chat_id = update["message"]["chat"]["id"]
+    text = update["message"].get("text", "")
+
+    # پیام شروع (Start)
+    if text == "/start":
+        welcome_text = (
+            "👋 سلام! به ربات **جستجوگر ویکی‌پدیا** خوش آمدید.\n\n"
+            "🔍 کافیست کلمه یا موضوعی که دنبالش هستید را برای من بفرستید تا آن را در ویکی‌پدیای فارسی جستجو کنم."
+        )
+        send_msg(chat_id, welcome_text)
+        return "ok"
+
+    # جستجوی متن ارسال شده توسط کاربر
+    send_msg(chat_id, f"🔍 در حال جستجو برای «{text}»...")
+    results = search_wikipedia(text)
+
+    if not results:
+        send_msg(chat_id, "❌ نتیجه‌ای در ویکی‌پدیای فارسی یافت نشد. کلمه دیگری را امتحان کنید.")
+        return "ok"
+
+    # ساخت دکمه‌های شیشه‌ای برای نتایج جستجو
+    keyboard = []
+    for res in results:
+        title = res["title"]
+        # محدودیت طول کالبک دیتا در تلگرام/بله معمولا 64 بایت است
+        keyboard.append([{"text": title, "callback_data": f"sum|{title}"[:60]}])
     
-    headers = {"Referer": base_url}
+    markup = {"inline_keyboard": keyboard}
+    send_msg(chat_id, "✅ نتایج زیر یافت شد. برای مشاهده خلاصه، روی یکی از موارد کلیک کنید:", reply_markup=markup)
 
-    async with AsyncSession(impersonate="chrome124", timeout=10.0, headers=headers) as client:
-
-        # CSS
-        for link in soup.find_all("link", rel="stylesheet"):
-            href = link.get("href")
-            if not href: continue
-            asset_url = urljoin(base_url, href)
-            try:
-                r = await client.get(asset_url)
-                if r.status_code == 200:
-                    style = soup.new_tag("style")
-                    style.string = r.text
-                    link.replace_with(style)
-            except: pass
-
-        # JS
-        for script in soup.find_all("script"):
-            src = script.get("src")
-            if not src: continue
-            asset_url = urljoin(base_url, src)
-            try:
-                r = await client.get(asset_url)
-                if r.status_code == 200:
-                    new_script = soup.new_tag("script")
-                    new_script.string = r.text
-                    script.replace_with(new_script)
-            except: pass
-
-        # Images
-        for img in soup.find_all("img"):
-            src = img.get("src")
-            if not src: continue
-            asset_url = urljoin(base_url, src)
-            try:
-                r = await client.get(asset_url)
-                if r.status_code == 200:
-                    content_type = r.headers.get("content-type", "image/jpeg")
-                    encoded = base64.b64encode(r.content).decode()
-                    img["src"] = f"data:{content_type};base64,{encoded}"
-            except: pass
-
-    return str(soup)
+    return "ok"
 
 
-# -----------------------------
-# Bale handler
-# -----------------------------
-@bot.on_message()
-async def handle(message):
-    if not message.text:
-        return
-
-    text = message.text.strip()
-
-    if not text.startswith("http"):
-        await message.reply("Send a valid URL starting with http/https.")
-        return
-
-    wait_msg = await message.reply("Downloading page... Please wait.")
-    filename = f"page_{message.chat.id}.html"
-    
-    try:
-        html = await fetch_page(text)
-        final_html = await inline_assets(html, text)
-
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(final_html)
-
-        await message.reply_document(filename)
-        await wait_msg.delete()
-
-    except Exception as e:
-        await message.reply(f"Error:\n{str(e)}")
-        
-    finally:
-        if os.path.exists(filename):
-            try:
-                os.remove(filename)
-            except:
-                pass
-
-# -----------------------------
-# Run
-# -----------------------------
 if __name__ == "__main__":
-    bot.run()
+    app.run(port=5000, debug=True)
