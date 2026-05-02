@@ -1,69 +1,134 @@
-from flask import Flask, request
-import requests
 import os
-import zipfile
-from crawler import crawl_single_page
+import base64
+import httpx
+from urllib.parse import urljoin
+from bs4 import BeautifulSoup
+from balethon import Client
 
-TOKEN = "1011430416:0-QaVTm8WjXtmVRcZKFvhfr_OGOL6OldiZs"
-API_FILE = f"https://tapi.bale.ai/bot{TOKEN}/sendDocument"
-API_MSG = f"https://tapi.bale.ai/bot{TOKEN}/sendMessage"
+BALE_TOKEN = "1011430416:0-QaVTm8WjXtmVRcZKFvhfr_OGOL6OldiZs"
 
-app = Flask(__name__)
+if not BALE_TOKEN:
+    raise ValueError("BALE_TOKEN not set")
 
-def zip_folder(folder, zipname):
-    with zipfile.ZipFile(zipname, "w", zipfile.ZIP_DEFLATED) as z:
-        for root, dirs, files in os.walk(folder):
-            for f in files:
-                path = os.path.join(root, f)
-                z.write(path, os.path.relpath(path, folder))
+bot = Client(BALE_TOKEN)
 
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = request.json
-    if "message" not in update:
-        return "ok"
+# -----------------------------
+# Browser-like headers
+# -----------------------------
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "*/*"
+}
 
-    chat = update["message"]["chat"]["id"]
-    text = update["message"].get("text", "")
+
+# -----------------------------
+# Fetch page
+# -----------------------------
+async def fetch_page(url):
+    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        return r.text
+
+
+# -----------------------------
+# Inline assets
+# -----------------------------
+async def inline_assets(html, base_url):
+
+    soup = BeautifulSoup(html, "lxml")
+
+    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True) as client:
+
+        # CSS
+        for link in soup.find_all("link", rel="stylesheet"):
+            href = link.get("href")
+            if not href:
+                continue
+
+            asset_url = urljoin(base_url, href)
+
+            try:
+                r = await client.get(asset_url)
+                style = soup.new_tag("style")
+                style.string = r.text
+                link.replace_with(style)
+            except:
+                pass
+
+        # JS
+        for script in soup.find_all("script"):
+            src = script.get("src")
+            if not src:
+                continue
+
+            asset_url = urljoin(base_url, src)
+
+            try:
+                r = await client.get(asset_url)
+                new_script = soup.new_tag("script")
+                new_script.string = r.text
+                script.replace_with(new_script)
+            except:
+                pass
+
+        # Images
+        for img in soup.find_all("img"):
+            src = img.get("src")
+            if not src:
+                continue
+
+            asset_url = urljoin(base_url, src)
+
+            try:
+                r = await client.get(asset_url)
+                encoded = base64.b64encode(r.content).decode()
+                img["src"] = f"data:image;base64,{encoded}"
+            except:
+                pass
+
+    return str(soup)
+
+
+# -----------------------------
+# Bale handler
+# -----------------------------
+@bot.on_message()
+async def handle(message):
+
+    if not message.text:
+        return
+
+    text = message.text.strip()
 
     if not text.startswith("http"):
-        send_msg(chat, "Send me a link to crawl:")
-        return "ok"
+        await message.reply("Send a URL.")
+        return
 
-    url = text.strip()
+    await message.reply("Downloading page...")
 
-    folder = "page_data"
-    zip_name = "page.zip"
+    try:
+        html = await fetch_page(text)
+        final_html = await inline_assets(html, text)
 
-    # clean old output
-    if os.path.exists(folder):
-        for f in os.listdir(folder):
-            os.remove(os.path.join(folder, f))
-    else:
-        os.makedirs(folder)
+        filename = "page.html"
 
-    # crawl
-    index_path = crawl_single_page(url, folder)
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(final_html)
 
-    # zip
-    zip_folder(folder, zip_name)
+        await message.reply_document(filename)
 
-    # send
-    send_file(chat, zip_name, caption="Here is the crawled page (open index.html)")
-
-    return "ok"
+    except Exception as e:
+        await message.reply(f"Error:\n{str(e)}")
 
 
-def send_msg(chat_id, txt):
-    requests.post(API_MSG, json={"chat_id": chat_id, "text": txt})
-
-
-def send_file(chat_id, path, caption=""):
-    with open(path, "rb") as f:
-        requests.post(API_FILE, data={"chat_id": chat_id, "caption": caption},
-                      files={"document": f})
-
-
+# -----------------------------
+# Run
+# -----------------------------
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    bot.run()
