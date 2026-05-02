@@ -1,38 +1,27 @@
-import os
 import yt_dlp
-import asyncio
 from balethon import Client
 
 BALE_TOKEN = "1011430416:0-QaVTm8WjXtmVRcZKFvhfr_OGOL6OldiZs"
 
-if not BALE_TOKEN:
-    raise ValueError("BALE_TOKEN not set")
-
 bot = Client(BALE_TOKEN)
 
-def download_track_sync(url: str):
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": "track.%(ext)s",
-        "quiet": True,
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ]
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-    if not filename.endswith(".mp3"):
-        filename = filename.rsplit(".", 1)[0] + ".mp3"
-    return filename, info
 
-async def download_track(url: str):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, download_track_sync, url)
+def get_direct_audio_url(url: str):
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    # بهترین لینک صوتی را پیدا کن
+    for f in info["formats"]:
+        if f.get("acodec") != "none" and f.get("url"):
+            return f["url"], info
+
+    raise ValueError("Direct audio URL not found")
+
 
 @bot.on_message()
 async def handler(message):
@@ -42,20 +31,22 @@ async def handler(message):
     text = message.text.strip()
 
     if "soundcloud.com" in text:
-        await message.reply("Download starting...")  # Immediate feedback
+        await message.reply("Generating direct audio URL...")
 
         try:
-            filename, info = await download_track(text)  # Start download async
+            audio_url, info = get_direct_audio_url(text)
 
             caption = f"{info.get('title','Track')}\nby {info.get('uploader','Unknown')}"
-            await message.reply_audio(filename, caption=caption)
 
-            # ✅ delete file after sending
-            if os.path.exists(filename):
-                os.remove(filename)
+            # ارسال مستقیم URL
+            await message.reply_audio(
+                audio=audio_url,
+                caption=caption
+            )
 
         except Exception as e:
             await message.reply(f"Error:\n{e}")
+
 
 if __name__ == "__main__":
     bot.run()
