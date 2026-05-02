@@ -1,7 +1,6 @@
 import os
 import yt_dlp
 from balethon import Client
-from youtubesearchpython import VideosSearch
 
 BALE_TOKEN = "1011430416:0-QaVTm8WjXtmVRcZKFvhfr_OGOL6OldiZs"
 
@@ -11,50 +10,68 @@ if not BALE_TOKEN:
 bot = Client(BALE_TOKEN)
 
 
-# -----------------------
-# Search SoundCloud
-# -----------------------
+# -------------------------------------------------
+# SEARCH (Uses yt-dlp SoundCloud search engine)
+# -------------------------------------------------
 
-def search_soundcloud(query):
+def search_soundcloud(query: str):
+    ydl_opts = {
+        "quiet": True,
+        "extract_flat": True,   # Do NOT download
+    }
 
-    search = VideosSearch(query + " site:soundcloud.com", limit=5)
-    results = search.result()["result"]
+    # scsearch10 => return 10 best results
+    sc_query = f"scsearch10:{query}"
 
-    tracks = []
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        data = ydl.extract_info(sc_query, download=False)
 
-    for r in results:
-        tracks.append({
-            "title": r["title"],
-            "url": r["link"],
-            "duration": r.get("duration", "unknown"),
-            "channel": r["channel"]["name"]
+    results = []
+    entries = data.get("entries", [])
+
+    for e in entries:
+        results.append({
+            "title": e.get("title"),
+            "url": e.get("url"),
+            "duration": e.get("duration"),
+            "uploader": e.get("uploader"),
         })
 
-    return tracks
+    return results
 
 
-# -----------------------
-# Download Track
-# -----------------------
+# -------------------------------------------------
+# DOWNLOAD TRACK
+# -------------------------------------------------
 
-def download_track(url):
-
+def download_track(url: str):
     ydl_opts = {
-        "format": "bestaudio",
+        "format": "bestaudio/best",
         "outtmpl": "track.%(ext)s",
-        "quiet": True
+        "quiet": True,
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }
+        ]
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
 
+    # After postprocess, extension becomes .mp3
+    if not filename.endswith(".mp3"):
+        filename = filename.rsplit(".", 1)[0] + ".mp3"
+
     return filename, info
 
 
-# -----------------------
-# Message handler
-# -----------------------
+# -------------------------------------------------
+# BOT HANDLER
+# -------------------------------------------------
 
 @bot.on_message()
 async def handler(message):
@@ -64,76 +81,68 @@ async def handler(message):
 
     text = message.text.strip()
 
-    # -------------------
-    # search
-    # -------------------
-
+    # --------------------------------------------
+    # SEARCH
+    # --------------------------------------------
     if text.startswith("/search"):
 
         query = text.replace("/search", "").strip()
 
         if not query:
-            await message.reply("Usage:\n/search song name")
+            await message.reply("Usage: /search song name")
             return
+
+        await message.reply("Searching SoundCloud...")
 
         results = search_soundcloud(query)
 
         if not results:
-            await message.reply("No results.")
+            await message.reply("No results found.")
             return
 
-        reply = "Results:\n\n"
+        reply = "SoundCloud Search Results:\n\n"
 
-        for i, r in enumerate(results, 1):
+        for i, r in enumerate(results, start=1):
             reply += f"{i}. {r['title']}\n"
-            reply += f"Artist: {r['channel']}\n"
-            reply += f"Duration: {r['duration']}\n"
+            reply += f"Artist: {r['uploader']}\n"
+            reply += f"Duration: {r['duration']} sec\n"
             reply += f"{r['url']}\n\n"
 
         await message.reply(reply)
         return
 
-
-    # -------------------
-    # download
-    # -------------------
-
+    # --------------------------------------------
+    # DOWNLOAD
+    # --------------------------------------------
     if "soundcloud.com" in text:
-
-        await message.reply("Downloading...")
+        await message.reply("Downloading audio, please wait...")
 
         try:
+            filename, info = download_track(text)
 
-            file, info = download_track(text)
+            caption = f"{info.get('title', 'Track')}\nby {info.get('uploader', 'Unknown')}"
 
-            title = info.get("title", "Track")
-            uploader = info.get("uploader", "Unknown")
-
-            caption = f"{title}\nby {uploader}"
-
-            await message.reply_audio(file, caption=caption)
+            await message.reply_audio(filename, caption=caption)
 
         except Exception as e:
-
-            await message.reply(f"Download failed:\n{str(e)}")
+            await message.reply(f"Error downloading:\n{e}")
 
         return
 
-
-    # -------------------
-    # help
-    # -------------------
-
+    # --------------------------------------------
+    # HELP
+    # --------------------------------------------
     await message.reply(
-        "SoundCloud Bot\n\n"
+        "SoundCloud Downloader Bot\n\n"
+        "Commands:\n"
         "/search song name\n"
-        "or send a SoundCloud link"
+        "Or send a SoundCloud link directly."
     )
 
 
-# -----------------------
-# Run
-# -----------------------
+# -------------------------------------------------
+# RUN BOT
+# -------------------------------------------------
 
 if __name__ == "__main__":
     bot.run()
