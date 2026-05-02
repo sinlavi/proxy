@@ -1,4 +1,3 @@
 balethon
-httpx
-beautifulsoup4
-lxml
+yt-dlp
+youtube-search-python
