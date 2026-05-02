@@ -1,3 +1,2 @@
 balethon
 yt-dlp
-youtube-search-python
