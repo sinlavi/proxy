@@ -1,9 +1,7 @@
 import os
-import base64
-import httpx
-from urllib.parse import urljoin
-from bs4 import BeautifulSoup
+import yt_dlp
 from balethon import Client
+from youtubesearchpython import VideosSearch
 
 BALE_TOKEN = "1011430416:0-QaVTm8WjXtmVRcZKFvhfr_OGOL6OldiZs"
 
@@ -13,122 +11,129 @@ if not BALE_TOKEN:
 bot = Client(BALE_TOKEN)
 
 
-# -----------------------------
-# Browser-like headers
-# -----------------------------
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0 Safari/537.36"
-    ),
-    "Accept": "*/*"
-}
+# -----------------------
+# Search SoundCloud
+# -----------------------
+
+def search_soundcloud(query):
+
+    search = VideosSearch(query + " site:soundcloud.com", limit=5)
+    results = search.result()["result"]
+
+    tracks = []
+
+    for r in results:
+        tracks.append({
+            "title": r["title"],
+            "url": r["link"],
+            "duration": r.get("duration", "unknown"),
+            "channel": r["channel"]["name"]
+        })
+
+    return tracks
 
 
-# -----------------------------
-# Fetch page
-# -----------------------------
-async def fetch_page(url):
-    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        return r.text
+# -----------------------
+# Download Track
+# -----------------------
+
+def download_track(url):
+
+    ydl_opts = {
+        "format": "bestaudio",
+        "outtmpl": "track.%(ext)s",
+        "quiet": True
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+
+    return filename, info
 
 
-# -----------------------------
-# Inline assets
-# -----------------------------
-async def inline_assets(html, base_url):
+# -----------------------
+# Message handler
+# -----------------------
 
-    soup = BeautifulSoup(html, "lxml")
-
-    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True) as client:
-
-        # CSS
-        for link in soup.find_all("link", rel="stylesheet"):
-            href = link.get("href")
-            if not href:
-                continue
-
-            asset_url = urljoin(base_url, href)
-
-            try:
-                r = await client.get(asset_url)
-                style = soup.new_tag("style")
-                style.string = r.text
-                link.replace_with(style)
-            except:
-                pass
-
-        # JS
-        for script in soup.find_all("script"):
-            src = script.get("src")
-            if not src:
-                continue
-
-            asset_url = urljoin(base_url, src)
-
-            try:
-                r = await client.get(asset_url)
-                new_script = soup.new_tag("script")
-                new_script.string = r.text
-                script.replace_with(new_script)
-            except:
-                pass
-
-        # Images
-        for img in soup.find_all("img"):
-            src = img.get("src")
-            if not src:
-                continue
-
-            asset_url = urljoin(base_url, src)
-
-            try:
-                r = await client.get(asset_url)
-                encoded = base64.b64encode(r.content).decode()
-                img["src"] = f"data:image;base64,{encoded}"
-            except:
-                pass
-
-    return str(soup)
-
-
-# -----------------------------
-# Bale handler
-# -----------------------------
 @bot.on_message()
-async def handle(message):
+async def handler(message):
 
     if not message.text:
         return
 
     text = message.text.strip()
 
-    if not text.startswith("http"):
-        await message.reply("Send a URL.")
+    # -------------------
+    # search
+    # -------------------
+
+    if text.startswith("/search"):
+
+        query = text.replace("/search", "").strip()
+
+        if not query:
+            await message.reply("Usage:\n/search song name")
+            return
+
+        results = search_soundcloud(query)
+
+        if not results:
+            await message.reply("No results.")
+            return
+
+        reply = "Results:\n\n"
+
+        for i, r in enumerate(results, 1):
+            reply += f"{i}. {r['title']}\n"
+            reply += f"Artist: {r['channel']}\n"
+            reply += f"Duration: {r['duration']}\n"
+            reply += f"{r['url']}\n\n"
+
+        await message.reply(reply)
         return
 
-    await message.reply("Downloading page...")
 
-    try:
-        html = await fetch_page(text)
-        final_html = await inline_assets(html, text)
+    # -------------------
+    # download
+    # -------------------
 
-        filename = "page.html"
+    if "soundcloud.com" in text:
 
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(final_html)
+        await message.reply("Downloading...")
 
-        await message.reply_document(filename)
+        try:
 
-    except Exception as e:
-        await message.reply(f"Error:\n{str(e)}")
+            file, info = download_track(text)
+
+            title = info.get("title", "Track")
+            uploader = info.get("uploader", "Unknown")
+
+            caption = f"{title}\nby {uploader}"
+
+            await message.reply_audio(file, caption=caption)
+
+        except Exception as e:
+
+            await message.reply(f"Download failed:\n{str(e)}")
+
+        return
 
 
-# -----------------------------
+    # -------------------
+    # help
+    # -------------------
+
+    await message.reply(
+        "SoundCloud Bot\n\n"
+        "/search song name\n"
+        "or send a SoundCloud link"
+    )
+
+
+# -----------------------
 # Run
-# -----------------------------
+# -----------------------
+
 if __name__ == "__main__":
     bot.run()
