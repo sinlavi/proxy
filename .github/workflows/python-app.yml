@@ -22,7 +22,8 @@ jobs:
       - name: Install requirements
         run: |
           pip install -r requirements.txt
-      - uses: FedericoCarboni/setup-ffmpeg@v3
+      - name: FFmpeg
+        uses: FedericoCarboni/setup-ffmpeg@v3
         id: setup-ffmpeg
         with:
           # A specific version to download, may also be "release" or a specific version
@@ -40,7 +41,6 @@ jobs:
           # As of version 3 of this action, builds are no longer downloaded from GitHub
           # except on Windows: https://github.com/GyanD/codexffmpeg/releases.
           github-token: ${{ github.server_url == 'https://github.com' && github.token || '' }}
-      - run: ffmpeg -i input.avi output.mkv
       - name: Run bot
         env:
           BALE_TOKEN: ${{ secrets.BALE_TOKEN }}
